@@ -5,7 +5,8 @@ const SOURCES = [
   "telegra.ph","reddit.com","t.me"
 ];
 
-const MEGA_RE = /https?:\/\/(?:www\.)?mega\.(?:nz|io)\/[^\s"'<>]+/gi;
+const MEGA_RE =
+  /https?:\/\/(?:www\.)?mega\.nz\/(?:file|folder)\/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+|https?:\/\/(?:www\.)?mega\.nz\/(?:#!|#F!)[A-Za-z0-9!_-]+/gi;
 
 export async function onRequestGet(context) {
   const url = new URL(context.request.url);
@@ -20,8 +21,7 @@ export async function onRequestGet(context) {
     pages.push(...found);
   }
 
-  const uniquePages = dedupe(pages).slice(0, 20);
-
+  const uniquePages = dedupePages(pages).slice(0, 24);
   const scanned = await Promise.allSettled(
     uniquePages.map(page => extractMega(page))
   );
@@ -41,22 +41,26 @@ export async function onRequestGet(context) {
 
 function buildQueries(q) {
   q = q.replace(/"/g, "").trim();
+
   const list = [
-    `${q} mega.nz`,
-    `${q} mega.nz/file OR mega.nz/folder`
+    `${q} mega.nz/file`,
+    `${q} mega.nz/folder`,
+    `${q} "mega.nz/file/" OR "mega.nz/folder/"`
   ];
 
   for (const site of SOURCES) {
-    list.push(`site:${site} ${q} mega.nz`);
+    list.push(`site:${site} ${q} "mega.nz/file/" OR "mega.nz/folder/"`);
   }
 
-  return list.slice(0, 16);
+  return list.slice(0, 18);
 }
 
 async function duckSearch(query) {
   try {
-    const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
-    const res = await fetch(url, {
+    const endpoint =
+      "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+
+    const res = await fetch(endpoint, {
       headers: {
         "User-Agent": "Mozilla/5.0",
         "Accept": "text/html"
@@ -71,6 +75,7 @@ async function duckSearch(query) {
     while ((m = re.exec(html)) !== null) {
       let href = decodeHtml(m[1]);
       href = cleanDuckUrl(href);
+
       if (href && href.startsWith("http")) {
         links.push({
           title: "Search Result",
@@ -88,6 +93,9 @@ async function duckSearch(query) {
 
 async function extractMega(page) {
   try {
+    const direct = extractLinksFromText(page.url);
+    if (direct.length) return { ...page, megaLinks: direct };
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
 
@@ -102,16 +110,17 @@ async function extractMega(page) {
     clearTimeout(timer);
 
     const text = await res.text();
-    const matches = text.match(MEGA_RE) || [];
-
-    const megaLinks = [...new Set(
-      matches.map(cleanMega).filter(Boolean)
-    )];
+    const megaLinks = extractLinksFromText(text);
 
     return { ...page, megaLinks };
   } catch {
     return { ...page, megaLinks: [] };
   }
+}
+
+function extractLinksFromText(text) {
+  const matches = String(text).match(MEGA_RE) || [];
+  return [...new Set(matches.map(cleanMega).filter(Boolean))];
 }
 
 function cleanMega(link) {
@@ -143,7 +152,7 @@ function decodeHtml(text) {
     .replace(/&#39;/g, "'");
 }
 
-function dedupe(items) {
+function dedupePages(items) {
   const seen = new Set();
   const out = [];
 
@@ -153,6 +162,7 @@ function dedupe(items) {
       u.hash = "";
       const clean = u.href;
       if (seen.has(clean)) continue;
+
       seen.add(clean);
       item.url = clean;
       out.push(item);
