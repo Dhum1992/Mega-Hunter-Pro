@@ -10,15 +10,17 @@ const MEGA_RE = /https?:\/\/(?:www\.)?mega\.(?:nz|io)\/[^\s"'<>]+/gi;
 export async function onRequestGet(context) {
   const url = new URL(context.request.url);
   const q = (url.searchParams.get("q") || "").trim();
-
   if (!q) return json({ error: "Missing q" }, 400);
 
-  const key = context.env.BRAVE_API_KEY;
-  if (!key) return json({ error: "Missing BRAVE_API_KEY" }, 500);
-
   const queries = buildQueries(q);
-  const pages = await searchBrave(queries, key);
-  const uniquePages = dedupe(pages).slice(0, 25);
+  const pages = [];
+
+  for (const query of queries) {
+    const found = await duckSearch(query);
+    pages.push(...found);
+  }
+
+  const uniquePages = dedupe(pages).slice(0, 20);
 
   const scanned = await Promise.allSettled(
     uniquePages.map(page => extractMega(page))
@@ -30,6 +32,7 @@ export async function onRequestGet(context) {
 
   return json({
     query: q,
+    source: "DuckDuckGo public search",
     scanned: uniquePages.length,
     found: results.length,
     results
@@ -40,49 +43,47 @@ function buildQueries(q) {
   q = q.replace(/"/g, "").trim();
   const list = [
     `${q} mega.nz`,
-    `${q} mega.nz/file OR mega.nz/folder OR mega.nz`
+    `${q} mega.nz/file OR mega.nz/folder`
   ];
 
   for (const site of SOURCES) {
     list.push(`site:${site} ${q} mega.nz`);
   }
 
-  return list.slice(0, 18);
+  return list.slice(0, 16);
 }
 
-async function searchBrave(queries, key) {
-  const all = [];
+async function duckSearch(query) {
+  try {
+    const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html"
+      }
+    });
 
-  for (const query of queries) {
-    try {
-      const api =
-        "https://api.search.brave.com/res/v1/web/search?q=" +
-        encodeURIComponent(query) +
-        "&count=5&freshness=pm";
+    const html = await res.text();
+    const links = [];
+    const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"/g;
+    let m;
 
-      const res = await fetch(api, {
-        headers: {
-          "Accept": "application/json",
-          "X-Subscription-Token": key
-        }
-      });
-
-      if (!res.ok) continue;
-
-      const data = await res.json();
-      const items = data.web?.results || [];
-
-      for (const item of items) {
-        all.push({
-          title: cleanText(item.title || ""),
-          url: item.url || "",
-          description: cleanText(item.description || "")
+    while ((m = re.exec(html)) !== null) {
+      let href = decodeHtml(m[1]);
+      href = cleanDuckUrl(href);
+      if (href && href.startsWith("http")) {
+        links.push({
+          title: "Search Result",
+          url: href,
+          description: query
         });
       }
-    } catch {}
-  }
+    }
 
-  return all;
+    return links.slice(0, 5);
+  } catch {
+    return [];
+  }
 }
 
 async function extractMega(page) {
@@ -99,11 +100,6 @@ async function extractMega(page) {
     });
 
     clearTimeout(timer);
-
-    const type = res.headers.get("content-type") || "";
-    if (!type.includes("text") && !type.includes("html") && !type.includes("json")) {
-      return { ...page, megaLinks: [] };
-    }
 
     const text = await res.text();
     const matches = text.match(MEGA_RE) || [];
@@ -126,6 +122,27 @@ function cleanMega(link) {
     .trim();
 }
 
+function cleanDuckUrl(href) {
+  try {
+    href = href.replace(/&amp;/g, "&");
+    if (href.includes("/l/?")) {
+      const u = new URL("https://duckduckgo.com" + href);
+      return decodeURIComponent(u.searchParams.get("uddg") || "");
+    }
+    return href;
+  } catch {
+    return "";
+  }
+}
+
+function decodeHtml(text) {
+  return String(text)
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x2F;/g, "/")
+    .replace(/&#39;/g, "'");
+}
+
 function dedupe(items) {
   const seen = new Set();
   const out = [];
@@ -143,10 +160,6 @@ function dedupe(items) {
   }
 
   return out;
-}
-
-function cleanText(text) {
-  return String(text).replace(/<[^>]+>/g, "").trim();
 }
 
 function json(data, status = 200) {
